@@ -28,3 +28,9 @@ module "docker_local" {
   docker_username = var.docker_username
   docker_password = var.docker_password
 }
+
+module "s3_code" {
+  source              = "./modules/s3_code"
+  bucket_name         = var.source_code_bucket
+  source_code_archive = var.source_code_archive
+}

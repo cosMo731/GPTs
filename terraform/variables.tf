@@ -40,3 +40,15 @@ variable "docker_password" {
   sensitive   = true
   default     = "changeme"
 }
+
+variable "source_code_bucket" {
+  description = "S3 bucket to store GitLab source code"
+  type        = string
+  default     = "example-source-code"
+}
+
+variable "source_code_archive" {
+  description = "Path to GitLab source code archive"
+  type        = string
+  default     = "./code.zip"
+}
