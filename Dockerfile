@@ -1,24 +1,30 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage Dockerfile for Django application
-# Each stage installs only the tools required for that purpose
+# Stage layout: deps -> build -> sast-node -> sast-python -> test -> runtime -> test-runtime
 
 ARG TARGET_ENV=develop
 ARG TFSEC_VERSION=1.28.1
 
-##### Build stage: compile tools only #####
-FROM python:3.12-slim AS build
-ARG TARGET_ENV
+##### deps stage: build dependency wheels #####
+FROM python:3.12-slim AS deps
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
-# Build dependency wheels first so later source changes do not invalidate cache
 RUN --mount=type=cache,target=/root/.cache/pip pip wheel -r requirements.txt --wheel-dir=/tmp/wheels \
     && find /tmp/wheels -name '*.so' -exec strip --strip-unneeded {} + || true \
     && apt-get purge -y gcc make curl && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+##### build stage: install uv and application code #####
+FROM python:3.12-slim AS build
+ARG TARGET_ENV
+WORKDIR /app
+COPY --from=deps /tmp/wheels /tmp/wheels
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir uv && rm -rf /tmp/wheels
 COPY myproject ./myproject
 COPY manage.py ./
+COPY requirements.txt ./
 
 ##### Node.js SAST stage #####
 FROM node:18-bullseye-slim AS sast-node
@@ -28,7 +34,6 @@ COPY --from=build /app /app
 ##### Python SAST stage #####
 FROM python:3.12-slim AS sast-python
 ARG TFSEC_VERSION
-# TODO: set the correct SHA256 of the tfsec binary when available
 ARG TFSEC_SHA256
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir ruff && \
     ARCH=$(uname -m); \
@@ -42,34 +47,28 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir ruff &
     chmod +x /usr/local/bin/tfsec
 COPY --from=build /app /app
 
-##### Test stage: install pytest when needed #####
+##### test stage: pytest only #####
 FROM build AS test
-ARG TARGET_ENV
-COPY --from=build /app /app
-WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
 
-##### Runtime stage: minimal image to run Django #####
+##### runtime stage: minimal image #####
 FROM python:3.12-slim AS runtime
 ARG TARGET_ENV
 ENV PYTHONUNBUFFERED=1 \
     GUNICORN_TIMEOUT=120 \
     GUNICORN_GRACEFUL_TIMEOUT=90
 WORKDIR /app
-COPY --from=build /app/requirements.txt ./
-COPY --from=build /tmp/wheels /tmp/wheels
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir --no-index --find-links=/tmp/wheels -r requirements.txt && \
-    if [ "$TARGET_ENV" = "develop" ]; then pip install --no-cache-dir debugpy; fi && \
+COPY requirements.txt ./
+COPY --from=deps /tmp/wheels /tmp/wheels
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-index --find-links=/tmp/wheels -r requirements.txt && \
     rm -rf /tmp/wheels && apt-get clean && rm -rf /var/lib/apt/lists/*
-COPY --from=build /app/myproject ./myproject
-COPY --from=build /app/manage.py ./
+COPY myproject ./myproject
+COPY manage.py ./
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD []
 
-##### Test runtime stage: server with pytest #####
+##### test runtime stage #####
 FROM runtime AS test-runtime
-ARG TARGET_ENV
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
-

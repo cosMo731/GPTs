@@ -2,7 +2,6 @@
 *.md
 .gitlab-ci.yml
 AGENTS.md
-Dockerfile
 .git
 node_modules
 __pycache__

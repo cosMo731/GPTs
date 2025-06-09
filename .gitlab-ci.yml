@@ -23,7 +23,6 @@ default:
     DOCKER_HOST: unix:///var/run/docker.sock
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
-    MASK_SECRETS: "true"
     TFSEC_VERSION: "1.28.1"
   before_script:
     - docker info
@@ -61,9 +60,21 @@ build_images:
         --set test.tags=$CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
         --set test-runtime.tags=$CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
         --set runtime.tags=$CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} \
-        --set *.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:latest \
-        --set *.cache-to=type=inline \
+        --set build.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache \
+        --set build.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache,mode=max \
+        --set sast-node.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache \
+        --set sast-node.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache,mode=max \
+        --set sast-python.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache \
+        --set sast-python.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache,mode=max \
+        --set test.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache \
+        --set test.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache,mode=max \
+        --set test-runtime.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache \
+        --set test-runtime.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache,mode=max \
+        --set runtime.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-runtime:cache \
+        --set runtime.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-runtime:cache,mode=max \
         --push
+  after_script:
+    - docker buildx rm $BUILDER || true
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
 
@@ -120,6 +131,16 @@ unit_tests:
       junit: junit.xml
     expire_in: 1 week
 
+shell_lint:
+  stage: test
+  image: koalaman/shellcheck-alpine
+  script:
+    - shellcheck entrypoint.sh
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
+  needs:
+    - build_images
+
 functional_tests:
   stage: test
   script:
@@ -127,6 +148,9 @@ functional_tests:
     - docker run -d --name django_app --network ci_bridge $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
+  after_script:
+    - docker rm django_app || true
+    - docker network rm ci_bridge || true
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
   needs:
@@ -136,7 +160,7 @@ functional_tests:
 terraform_init:
   stage: deploy
   image: hashicorp/terraform:1.5.6
-  tags: [terraform]
+  tags: ["runner17", "terraform"]
   script:
     - terraform init
   rules:
@@ -150,7 +174,7 @@ terraform_init:
 terraform_plan:
   stage: deploy
   image: hashicorp/terraform:1.5.6
-  tags: [terraform]
+  tags: ["runner17", "terraform"]
   script:
     - terraform plan -out=tfplan
   rules:
@@ -165,7 +189,7 @@ terraform_plan:
 terraform_apply:
   stage: deploy
   image: hashicorp/terraform:1.5.6
-  tags: [terraform]
+  tags: ["runner17", "terraform"]
   script:
     - terraform apply -auto-approve tfplan
   rules:
