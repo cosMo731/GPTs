@@ -1,0 +1,17 @@
+# Exclude docs and CI configuration to keep build context small
+*.md
+.gitlab-ci.yml
+AGENTS.md
+.git
+node_modules
+__pycache__
+.env
+*.local
+.vscode/
+.idea/
+
+*.log
+tmp/
+build/
+.output/
+docker-bake.hcl
