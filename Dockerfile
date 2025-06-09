@@ -21,7 +21,7 @@ FROM python:3.12-slim AS build
 ARG TARGET_ENV
 WORKDIR /app
 COPY --from=deps /tmp/wheels /tmp/wheels
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir uv && rm -rf /tmp/wheels
+# Build stage installs application code; uv is no longer required
 COPY myproject ./myproject
 COPY manage.py ./
 COPY requirements.txt ./
@@ -49,7 +49,7 @@ COPY --from=build /app /app
 
 ##### test stage: pytest only #####
 FROM build AS test
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-index --find-links=/tmp/wheels pytest
 
 ##### runtime stage: minimal image #####
 FROM python:3.12-slim AS runtime

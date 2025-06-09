@@ -52,11 +52,15 @@ build_images:
       docker buildx inspect $BUILDER >/dev/null 2>&1 || \
         docker buildx create --name $BUILDER --use
     - |
+      TFSEC_SHA256=$(curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/checksums.txt | grep linux-amd64 | awk '{print $1}')
+    - |
       docker buildx bake -f docker-bake.hcl all \
         --set *.args.TARGET_ENV=${CI_COMMIT_REF_NAME} \
         --set build.tags=$CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA},$CI_REGISTRY_IMAGE/myapp-build:latest \
         --set sast-node.tags=$CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} \
         --set sast-python.tags=$CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} \
+        --set sast-python.args.TFSEC_VERSION=${TFSEC_VERSION} \
+        --set sast-python.args.TFSEC_SHA256=${TFSEC_SHA256} \
         --set test.tags=$CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
         --set test-runtime.tags=$CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
         --set runtime.tags=$CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} \
@@ -74,7 +78,7 @@ build_images:
         --set runtime.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-runtime:cache,mode=max \
         --push
   after_script:
-    - docker buildx rm $BUILDER || true
+    - docker buildx rm -f $BUILDER || true
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
 
@@ -138,19 +142,18 @@ shell_lint:
     - shellcheck entrypoint.sh
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
-  needs:
-    - build_images
 
 functional_tests:
   stage: test
   script:
-    - docker network create ci_bridge || true
-    - docker run -d --name django_app --network ci_bridge $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
+    - NETWORK=ci_bridge_${CI_PIPELINE_ID}
+    - docker network create $NETWORK || true
+    - docker run -d --name django_app --network $NETWORK $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
   after_script:
     - docker rm django_app || true
-    - docker network rm ci_bridge || true
+    - docker network rm $NETWORK || true
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
   needs:
@@ -165,8 +168,9 @@ terraform_init:
     - terraform init
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release"'
+      when: on_success
     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
-  when: on_success
+      when: on_success
   variables:
     AWS_REGION: $AWS_REGION
   # AWS credentials are supplied via protected variables
@@ -244,6 +248,4 @@ push_image:
     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
   needs:
     - build_image
-  variables:
-    MASK_SECRETS: 'true'
   # AWS credentials are supplied via protected variables
