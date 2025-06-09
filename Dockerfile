@@ -10,18 +10,18 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir uvicorn
 COPY . /app
 
 ##### SAST stage: lint and security tools #####
-FROM build AS sast
+FROM node:18-bullseye-slim AS sast
 ARG TARGET_ENV
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
-    apt-get update && apt-get install -y nodejs curl && \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip curl && \
     npm install -g eslint && \
-    pip install --no-cache-dir ruff && \
+    pip3 install --no-cache-dir ruff && \
     if [ "$TARGET_ENV" = "release" ]; then curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | sh; fi && \
     rm -rf /var/lib/apt/lists/*
+COPY --from=build /app /app
 
 ##### Test stage: install pytest when needed #####
 FROM build AS test

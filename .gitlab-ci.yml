@@ -33,13 +33,6 @@ stages:
   - deploy
 
 # ---- Build stage ----
-# Build base image for feature branches
-mr_setup:
-  stage: build
-  script:
-    - docker build --build-arg TARGET_ENV=feature --target build -t myapp-build:${CI_COMMIT_SHA} .
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "feature"'
 
 # Build SAST image once per pipeline
 build_sast_image:
@@ -120,8 +113,7 @@ terraform_init:
     - terraform init
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - functional_tests
+  when: on_success
 
 terraform_plan:
   stage: deploy
@@ -132,6 +124,7 @@ terraform_plan:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
     - terraform_init
+  when: on_success
 
 terraform_apply:
   stage: deploy
@@ -142,6 +135,7 @@ terraform_apply:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
     - terraform_plan
+  when: on_success
 
 dev_deploy:
   stage: deploy
@@ -150,8 +144,6 @@ dev_deploy:
     - echo "Deploying container to EC2 filesystem"
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
-  needs:
-    - backend_sast
 
 build_image:
   stage: deploy
