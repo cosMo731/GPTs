@@ -9,3 +9,7 @@ __pycache__
 *.local
 .vscode/
 .idea/
+
+*.log
+tmp/
+build/

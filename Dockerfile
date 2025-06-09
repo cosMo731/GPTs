@@ -9,13 +9,15 @@ ARG TARGET_ENV
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make \
+    && pip install --no-cache-dir uv \
     && rm -rf /var/lib/apt/lists/*
 COPY . /app
 
 ##### SAST stage: lint and security tools #####
 FROM node:18-bullseye-slim AS sast
 ARG TARGET_ENV
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip curl && \
+RUN --mount=type=cache,target=/root/.npm --mount=type=cache,target=/root/.cache/pip \
+    apt-get update && apt-get install -y --no-install-recommends python3 python3-pip curl && \
     npm install -g eslint && \
     pip3 install --no-cache-dir ruff && \
     if [ "$TARGET_ENV" = "release" ]; then curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | sh; fi && \
@@ -34,7 +36,9 @@ FROM python:3.12-slim AS runtime
 ARG TARGET_ENV
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY . /app
+COPY --from=build /app/requirements.txt /app/
+COPY --from=build /app/myproject /app/myproject
+COPY --from=build /app/manage.py /app/
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir Django uvicorn && \
     if [ "$TARGET_ENV" = "develop" ]; then pip install --no-cache-dir debugpy; fi && \
     apt-get purge -y gcc make && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*

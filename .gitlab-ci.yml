@@ -11,7 +11,7 @@ workflow:
 
 # Docker-in-Docker runner using custom CI image
 default:
-  image: myregistry/my-ci-image:latest
+  image: ${MY_CI_IMAGE:-myregistry/my-ci-image:latest}
   services:
     - name: docker:dind
       alias: docker
@@ -40,10 +40,10 @@ build_base_images:
   stage: build
   script:
     - |
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target build -t myapp-build:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test -t myapp-test:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test-runtime -t myapp-test-runtime:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target build --cache-from=myapp-build:latest -t myapp-build:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast   --cache-from=myapp-sast:latest -t myapp-sast:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test   --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test-runtime --cache-from=myapp-test-runtime:latest -t myapp-test-runtime:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
 
@@ -150,6 +150,8 @@ dev_deploy:
     - echo "Deploying container to EC2 filesystem"
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
+  needs:
+    - functional_tests
 
 build_image:
   stage: deploy
