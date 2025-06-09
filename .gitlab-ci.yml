@@ -5,15 +5,21 @@
 
 workflow:
   rules:
-    - if: $CI_MERGE_REQUEST_ID
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "tag"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: always
     - when: never
 
 # Docker-in-Docker runner using custom CI image
 default:
-  image: ${MY_CI_IMAGE:-myregistry/my-ci-image:latest}
+  image: docker:20.10
   services:
-    - name: docker:dind
+    - name: docker:20.10-dind-rootless
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2375
@@ -22,11 +28,11 @@ default:
   before_script:
     - docker info
   cache:
-    key: "$CI_PROJECT_ID-$CI_COMMIT_REF_SLUG"
+    key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+    policy: pull-push
     paths:
       - .cache/pip
       - .npm
-  privileged: true
 
 stages:
   - build
@@ -41,9 +47,11 @@ build_base_images:
   script:
     - |
       docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target build --cache-from=myapp-build:latest -t myapp-build:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast   --cache-from=myapp-sast:latest -t myapp-sast:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test   --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast-node --cache-from=myapp-sast-node:latest -t myapp-sast-node:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast-python --cache-from=myapp-sast-python:latest -t myapp-sast-python:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
       docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test-runtime --cache-from=myapp-test-runtime:latest -t myapp-test-runtime:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target runtime -t myapp:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
 
@@ -51,40 +59,40 @@ build_base_images:
 front_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} sh -c 'eslint . -f json -o eslint-report.json'
+    - docker run --rm myapp-sast-node:${CI_COMMIT_SHA} sh -c 'eslint . -f sarif -o eslint.sarif'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
   needs:
     - build_base_images
   artifacts:
     reports:
-      codequality: eslint-report.json
+      sast: eslint.sarif
     expire_in: 1 week
 
 backend_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} sh -c 'ruff . --format=checkstyle > ruff-report.xml'
+    - docker run --rm myapp-sast-python:${CI_COMMIT_SHA} sh -c 'ruff . --output-format sarif > ruff.sarif'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
   needs:
-    - front_sast
+    - build_base_images
   artifacts:
     reports:
-      junit: ruff-report.xml
+      sast: ruff.sarif
     expire_in: 1 week
 
 tf_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec-report.sarif'
+    - docker run --rm myapp-sast-python:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec.sarif'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
-    - backend_sast
+    - build_base_images
   artifacts:
     reports:
-      sast: tfsec-report.sarif
+      sast: tfsec.sarif
     expire_in: 1 week
 
 unit_tests:
@@ -92,9 +100,9 @@ unit_tests:
   script:
     - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(develop|release)$"'
   needs:
-    - tf_sast
+    - build_base_images
   artifacts:
     reports:
       junit: junit.xml
@@ -115,6 +123,7 @@ functional_tests:
 terraform_init:
   stage: deploy
   image: hashicorp/terraform:1.5.6
+  tags: [terraform]
   script:
     - terraform init
   rules:
@@ -124,6 +133,7 @@ terraform_init:
 terraform_plan:
   stage: deploy
   image: hashicorp/terraform:1.5.6
+  tags: [terraform]
   script:
     - terraform plan -out=tfplan
   rules:
@@ -135,6 +145,7 @@ terraform_plan:
 terraform_apply:
   stage: deploy
   image: hashicorp/terraform:1.5.6
+  tags: [terraform]
   script:
     - terraform apply -auto-approve tfplan
   rules:
@@ -146,7 +157,7 @@ terraform_apply:
 dev_deploy:
   stage: deploy
   script:
-    - docker build --build-arg TARGET_ENV=develop --target runtime -t myapp:dev-${CI_COMMIT_SHA} .
+    - docker tag myapp:${CI_COMMIT_SHA} myapp:dev-${CI_COMMIT_SHORT_SHA}
     - echo "Deploying container to EC2 filesystem"
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
@@ -156,21 +167,31 @@ dev_deploy:
 build_image:
   stage: deploy
   script:
-    - docker build --build-arg TARGET_ENV=release --target build -t myapp-build:${CI_COMMIT_SHA} .
-    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp:${CI_COMMIT_SHA} .
+    - |
+      DATE_TAG=$(date +%Y%m%d.%H%M)-${CI_COMMIT_SHORT_SHA}
+      docker tag myapp:${CI_COMMIT_SHA} myapp:${DATE_TAG}
+      echo $DATE_TAG > image_tag.txt
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
     - terraform_apply
+  artifacts:
+    paths:
+      - image_tag.txt
 
 push_image:
   stage: deploy
   image: amazon/aws-cli:latest
   script:
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_ACCOUNT_URL
-    - docker tag myapp:${CI_COMMIT_SHA} $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
-    - docker push $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
+    - set +x
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin --quiet $AWS_ECR_ACCOUNT_URL
+    - set -x
+    - DATE_TAG=$(cat image_tag.txt)
+    - docker tag myapp:${DATE_TAG} $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
+    - docker push $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
     - build_image
+  variables:
+    MASK_SECRETS: 'true'
