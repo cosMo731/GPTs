@@ -36,6 +36,7 @@ default:
 
 stages:
   - build
+  - static
   - test
   - deploy
 
@@ -52,7 +53,13 @@ build_images:
       docker buildx inspect $BUILDER >/dev/null 2>&1 || \
         docker buildx create --name $BUILDER --use
     - |
-      TFSEC_SHA256=$(curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/checksums.txt | grep linux-amd64 | awk '{print $1}')
+      ARCH=$(uname -m)
+      case "$ARCH" in
+        aarch64) TFSEC_BIN=tfsec-linux-arm64 ;;
+        armv7l) TFSEC_BIN=tfsec-linux-armv7 ;;
+        *) TFSEC_BIN=tfsec-linux-amd64 ;;
+      esac
+      TFSEC_SHA256=$(curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/checksums.txt | grep ${TFSEC_BIN} | awk '{print $1}')
     - |
       docker buildx bake -f docker-bake.hcl all \
         --set *.args.TARGET_ENV=${CI_COMMIT_REF_NAME} \
@@ -63,22 +70,11 @@ build_images:
         --set sast-python.args.TFSEC_SHA256=${TFSEC_SHA256} \
         --set test.tags=$CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
         --set test-runtime.tags=$CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
-        --set runtime.tags=$CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} \
-        --set build.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache \
-        --set build.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache,mode=max \
-        --set sast-node.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache \
-        --set sast-node.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache,mode=max \
-        --set sast-python.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache \
-        --set sast-python.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache,mode=max \
-        --set test.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache \
-        --set test.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache,mode=max \
-        --set test-runtime.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache \
-        --set test-runtime.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache,mode=max \
-        --set runtime.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-runtime:cache \
-        --set runtime.cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-runtime:cache,mode=max \
+        --set runtime.tags=$CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA},$CI_REGISTRY_IMAGE/myapp-runtime:latest \
         --push
   after_script:
-    - docker buildx rm -f $BUILDER || true
+    - docker buildx stop $BUILDER || true
+    - docker buildx rm $BUILDER || true
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
 
@@ -136,12 +132,13 @@ unit_tests:
     expire_in: 1 week
 
 shell_lint:
-  stage: test
+  stage: static
   image: koalaman/shellcheck-alpine
   script:
     - shellcheck entrypoint.sh
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
+  needs: []
 
 functional_tests:
   stage: test
@@ -183,6 +180,9 @@ terraform_plan:
     - terraform plan -out=tfplan
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+      when: on_success
   needs:
     - terraform_init
   when: on_success
@@ -198,6 +198,9 @@ terraform_apply:
     - terraform apply -auto-approve tfplan
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+      when: on_success
   needs:
     - terraform_plan
   when: on_success

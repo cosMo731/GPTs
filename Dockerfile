@@ -49,7 +49,7 @@ COPY --from=build /app /app
 
 ##### test stage: pytest only #####
 FROM build AS test
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-index --find-links=/tmp/wheels pytest
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
 
 ##### runtime stage: minimal image #####
 FROM python:3.12-slim AS runtime
@@ -58,9 +58,8 @@ ENV PYTHONUNBUFFERED=1 \
     GUNICORN_TIMEOUT=120 \
     GUNICORN_GRACEFUL_TIMEOUT=90
 WORKDIR /app
-COPY requirements.txt ./
 COPY --from=deps /tmp/wheels /tmp/wheels
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-index --find-links=/tmp/wheels -r requirements.txt && \
+RUN --mount=type=cache,target=/root/.cache/pip pip install /tmp/wheels/* && \
     rm -rf /tmp/wheels && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY myproject ./myproject
 COPY manage.py ./
