@@ -1,0 +1,176 @@
+# GitLab CI/CD pipeline for Django and Vue application
+# Stages: build -> test -> deploy
+# Release MRs run the full pipeline including Terraform and image push
+
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+      when: always
+    - when: never
+
+# Docker-in-Docker runner using custom CI image
+default:
+  image: myregistry/my-ci-image:latest
+  services:
+    - name: docker:dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - docker info
+  cache:
+    key: "$CI_PROJECT_ID-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/pip
+      - .npm
+  privileged: true
+
+stages:
+  - build
+  - test
+  - deploy
+
+# ---- Build stage ----
+# Build base image for feature branches
+mr_setup:
+  stage: build
+  script:
+    - docker build --build-arg TARGET_ENV=feature --target build -t myapp-build:${CI_COMMIT_SHA} .
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "feature"'
+
+# Build SAST image once per pipeline
+build_sast_image:
+  stage: build
+  script:
+    - docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
+  needs:
+    - mr_setup
+
+# ---- Test stage ----
+front_sast:
+  stage: test
+  script:
+    - docker run --rm myapp-sast:${CI_COMMIT_SHA} eslint .
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
+  needs:
+    - build_sast_image
+  artifacts:
+    paths:
+      - eslint-report.txt
+
+backend_sast:
+  stage: test
+  script:
+    - docker run --rm myapp-sast:${CI_COMMIT_SHA} ruff . > ruff-report.txt
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
+  needs:
+    - front_sast
+  artifacts:
+    paths:
+      - ruff-report.txt
+
+tf_sast:
+  stage: test
+  script:
+    - docker run --rm myapp-sast:${CI_COMMIT_SHA} tfsec /app/terraform > tfsec-report.txt
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
+  needs:
+    - backend_sast
+  artifacts:
+    paths:
+      - tfsec-report.txt
+
+unit_tests:
+  stage: test
+  script:
+    - docker build --build-arg TARGET_ENV=release --target test -t myapp-test:${CI_COMMIT_SHA} .
+    - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - tf_sast
+  artifacts:
+    reports:
+      junit: junit.xml
+    expire_in: 1 week
+
+functional_tests:
+  stage: test
+  script:
+    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp-runtime:${CI_COMMIT_SHA} .
+    - docker run -d --name django_app -p 8000:8000 myapp-runtime:${CI_COMMIT_SHA}
+    - docker exec django_app pytest tests/functional
+    - docker stop django_app
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - unit_tests
+
+# ---- Deploy stage ----
+terraform_init:
+  stage: deploy
+  image: hashicorp/terraform:1.5.6
+  script:
+    - terraform init
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - functional_tests
+
+terraform_plan:
+  stage: deploy
+  image: hashicorp/terraform:1.5.6
+  script:
+    - terraform plan -out=tfplan
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - terraform_init
+
+terraform_apply:
+  stage: deploy
+  image: hashicorp/terraform:1.5.6
+  script:
+    - terraform apply -auto-approve tfplan
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - terraform_plan
+
+dev_deploy:
+  stage: deploy
+  script:
+    - docker build --build-arg TARGET_ENV=develop --target runtime -t myapp:dev-${CI_COMMIT_SHA} .
+    - echo "Deploying container to EC2 filesystem"
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
+  needs:
+    - tf_sast
+
+build_image:
+  stage: deploy
+  script:
+    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp:${CI_COMMIT_SHA} .
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - terraform_apply
+
+push_image:
+  stage: deploy
+  image: amazon/aws-cli:latest
+  script:
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_ACCOUNT_URL
+    - docker tag myapp:${CI_COMMIT_SHA} $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
+    - docker push $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
+  needs:
+    - build_image
