@@ -1,4 +1,5 @@
 # GitLab CI/CD pipeline for Django and Vue application
+---
 # Stages: build -> test -> deploy
 # Release MRs run the full pipeline including Terraform and image push
 
@@ -47,8 +48,6 @@ build_sast_image:
     - docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - mr_setup
 
 # ---- Test stage ----
 front_sast:
@@ -80,7 +79,7 @@ tf_sast:
   script:
     - docker run --rm myapp-sast:${CI_COMMIT_SHA} tfsec /app/terraform > tfsec-report.txt
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
     - backend_sast
   artifacts:
@@ -104,8 +103,8 @@ unit_tests:
 functional_tests:
   stage: test
   script:
-    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp-runtime:${CI_COMMIT_SHA} .
-    - docker run -d --name django_app -p 8000:8000 myapp-runtime:${CI_COMMIT_SHA}
+    - docker build --build-arg TARGET_ENV=release --target test-runtime -t myapp-test-runtime:${CI_COMMIT_SHA} .
+    - docker run -d --name django_app -p 8000:8000 myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
   rules:
@@ -152,11 +151,12 @@ dev_deploy:
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
   needs:
-    - tf_sast
+    - backend_sast
 
 build_image:
   stage: deploy
   script:
+    - docker build --build-arg TARGET_ENV=release --target build -t myapp-build:${CI_COMMIT_SHA} .
     - docker build --build-arg TARGET_ENV=release --target runtime -t myapp:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
