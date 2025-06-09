@@ -13,7 +13,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
+# Dependencies are installed from requirements.txt. Using a lock file (pip-tools/Poetry)
+# would ensure deterministic builds.
 RUN --mount=type=cache,target=/root/.cache/pip pip wheel -r requirements.txt --wheel-dir=/tmp/wheels \
+    && find /tmp/wheels -name '*.so' -exec strip --strip-unneeded {} + || true \
     && apt-get purge -y gcc make curl && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY . .
 
@@ -27,7 +30,11 @@ FROM python:3.12-slim AS sast-python
 ARG TFSEC_VERSION
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir ruff && \
     ARCH=$(uname -m); \
-    if [ "$ARCH" = "aarch64" ]; then TFSEC_BIN=tfsec-linux-arm64; else TFSEC_BIN=tfsec-linux-amd64; fi && \
+    case "$ARCH" in \
+      aarch64) TFSEC_BIN=tfsec-linux-arm64 ;; \
+      armv7l) TFSEC_BIN=tfsec-linux-armv7 ;; \
+      *) TFSEC_BIN=tfsec-linux-amd64 ;; \
+    esac && \
     curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/${TFSEC_BIN} -o /usr/local/bin/tfsec && \
     chmod +x /usr/local/bin/tfsec
 COPY --from=build /app /app
@@ -51,8 +58,8 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir --no-i
     rm -rf /tmp/wheels && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/myproject ./myproject
 COPY --from=build /app/manage.py ./
-ENTRYPOINT ["gunicorn"]
-CMD ["myproject.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+ENTRYPOINT ["gunicorn", "myproject.asgi:application", "-k", "uvicorn.workers.UvicornWorker"]
+CMD ["--bind", "0.0.0.0:8000"]
 
 ##### Test runtime stage: server with pytest #####
 FROM runtime AS test-runtime

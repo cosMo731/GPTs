@@ -25,11 +25,14 @@ default:
     DOCKER_HOST: unix:///run/user/1000/docker.sock
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
-    MASK_SECRETS: "true"
+    MASK_SECRETS: "true"  # Runner 17+ required for masking
+    # NOTE: rootless dind may fail to push images. Consider BuildKit or Kaniko.
     TFSEC_VERSION: "1.28.1"
-  before_script: []
+  before_script:
+    # Login to GitLab Container Registry for pulling and pushing build caches
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   cache:
-    key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+    key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG-$CI_PIPELINE_ID"
     policy: pull-push
     paths:
       - .cache/pip
@@ -48,22 +51,37 @@ stages:
 build_base_images:
   stage: build
   script:
-    - docker pull myapp-build:latest || true
-    - docker pull myapp-sast-node:latest || true
-    - docker pull myapp-sast-python:latest || true
-    - docker pull myapp-test:latest || true
-    - docker pull myapp-test-runtime:latest || true
+    - docker pull $CI_REGISTRY_IMAGE/myapp-build:latest || true
+    - docker pull $CI_REGISTRY_IMAGE/myapp-sast-node:latest || true
+    - docker pull $CI_REGISTRY_IMAGE/myapp-sast-python:latest || true
+    - docker pull $CI_REGISTRY_IMAGE/myapp-test:latest || true
+    - docker pull $CI_REGISTRY_IMAGE/myapp-test-runtime:latest || true
     - |
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target build --cache-from=myapp-build:latest -t myapp-build:${CI_COMMIT_SHA} .
-      docker push myapp-build:${CI_COMMIT_SHA} || true  # TODO: set registry
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target sast-node --cache-from=myapp-sast-node:latest -t myapp-sast-node:${CI_COMMIT_SHA} .
-      docker push myapp-sast-node:${CI_COMMIT_SHA} || true  # TODO: set registry
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --build-arg TFSEC_VERSION=${TFSEC_VERSION} --target sast-python --cache-from=myapp-sast-python:latest -t myapp-sast-python:${CI_COMMIT_SHA} .
-      docker push myapp-sast-python:${CI_COMMIT_SHA} || true  # TODO: set registry
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target test --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
-      docker push myapp-test:${CI_COMMIT_SHA} || true  # TODO: set registry
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target test-runtime --cache-from=myapp-test-runtime:latest -t myapp-test-runtime:${CI_COMMIT_SHA} .
-      docker push myapp-test-runtime:${CI_COMMIT_SHA} || true  # TODO: set registry
+      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
+        --target build --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache \
+        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache,mode=max \
+        -t $CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA} .
+      docker push $CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA}
+      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
+        --target sast-node --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache \
+        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache,mode=max \
+        -t $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} .
+      docker push $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA}
+      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --build-arg TFSEC_VERSION=${TFSEC_VERSION} \
+        --target sast-python --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache \
+        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache,mode=max \
+        -t $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} .
+      docker push $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA}
+      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
+        --target test --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache \
+        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache,mode=max \
+        -t $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} .
+      docker push $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA}
+      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
+        --target test-runtime --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache \
+        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache,mode=max \
+        -t $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} .
+      docker push $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target runtime -t myapp:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
@@ -72,7 +90,7 @@ build_base_images:
 front_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app/frontend 2>/dev/null || cd /app && eslint . -f sarif -o eslint.sarif'
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app/frontend 2>/dev/null || cd /app && eslint . -f sarif -o eslint.sarif'
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
   needs:
@@ -85,7 +103,7 @@ front_sast:
 backend_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast-python:${CI_COMMIT_SHA} sh -c 'ruff . --output-format sarif > ruff.sarif'
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} sh -c 'ruff . --output-format sarif > ruff.sarif'
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
   needs:
@@ -98,7 +116,7 @@ backend_sast:
 tf_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast-python:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec.sarif'
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec.sarif'
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
   needs:
@@ -111,7 +129,7 @@ tf_sast:
 unit_tests:
   stage: test
   script:
-    - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(develop|release)$" || $CI_COMMIT_TAG'
   needs:
@@ -124,12 +142,11 @@ unit_tests:
 functional_tests:
   stage: test
   script:
-    - PORT=$(shuf -i 8000-9000 -n 1)
-    - docker run -d --name django_app -p ${PORT}:8000 myapp-test-runtime:${CI_COMMIT_SHA}
+    - docker run -d --name django_app --network none $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
   rules:
-    - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
   needs:
     - unit_tests
 
