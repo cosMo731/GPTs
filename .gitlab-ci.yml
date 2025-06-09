@@ -18,6 +18,7 @@ default:
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: "1"
   before_script:
     - docker info
   cache:
@@ -34,11 +35,15 @@ stages:
 
 # ---- Build stage ----
 
-# Build SAST image once per pipeline
-build_sast_image:
+# Build base images once per pipeline
+build_base_images:
   stage: build
   script:
-    - docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
+    - |
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target build -t myapp-build:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test -t myapp-test:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test-runtime -t myapp-test-runtime:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
 
@@ -46,43 +51,45 @@ build_sast_image:
 front_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} eslint .
+    - docker run --rm myapp-sast:${CI_COMMIT_SHA} sh -c 'eslint . -f json -o eslint-report.json'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
   needs:
-    - build_sast_image
+    - build_base_images
   artifacts:
-    paths:
-      - eslint-report.txt
+    reports:
+      codequality: eslint-report.json
+    expire_in: 1 week
 
 backend_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} ruff . > ruff-report.txt
+    - docker run --rm myapp-sast:${CI_COMMIT_SHA} sh -c 'ruff . --format=checkstyle > ruff-report.xml'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
   needs:
     - front_sast
   artifacts:
-    paths:
-      - ruff-report.txt
+    reports:
+      junit: ruff-report.xml
+    expire_in: 1 week
 
 tf_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} tfsec /app/terraform > tfsec-report.txt
+    - docker run --rm myapp-sast:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec-report.sarif'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   needs:
     - backend_sast
   artifacts:
-    paths:
-      - tfsec-report.txt
+    reports:
+      sast: tfsec-report.sarif
+    expire_in: 1 week
 
 unit_tests:
   stage: test
   script:
-    - docker build --build-arg TARGET_ENV=release --target test -t myapp-test:${CI_COMMIT_SHA} .
     - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
@@ -96,7 +103,6 @@ unit_tests:
 functional_tests:
   stage: test
   script:
-    - docker build --build-arg TARGET_ENV=release --target test-runtime -t myapp-test-runtime:${CI_COMMIT_SHA} .
     - docker run -d --name django_app -p 8000:8000 myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app

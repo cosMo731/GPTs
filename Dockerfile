@@ -3,14 +3,13 @@
 
 ARG TARGET_ENV=develop
 
-##### Build stage: compile tools and uv #####
+##### Build stage: compile tools only #####
 FROM python:3.12-slim AS build
 ARG TARGET_ENV
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir uvicorn
 COPY . /app
 
 ##### SAST stage: lint and security tools #####
@@ -28,15 +27,15 @@ FROM build AS test
 ARG TARGET_ENV
 COPY --from=build /app /app
 WORKDIR /app
-RUN pip install --no-cache-dir pytest
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
 
 ##### Runtime stage: minimal image to run Django #####
 FROM python:3.12-slim AS runtime
 ARG TARGET_ENV
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY --from=build /app /app
-RUN pip install --no-cache-dir Django uvicorn && \
+COPY . /app
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir Django uvicorn && \
     if [ "$TARGET_ENV" = "develop" ]; then pip install --no-cache-dir debugpy; fi && \
     apt-get purge -y gcc make && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 CMD ["uvicorn", "myproject.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
@@ -44,4 +43,4 @@ CMD ["uvicorn", "myproject.asgi:application", "--host", "0.0.0.0", "--port", "80
 ##### Test runtime stage: server with pytest #####
 FROM runtime AS test-runtime
 ARG TARGET_ENV
-RUN pip install --no-cache-dir pytest
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest

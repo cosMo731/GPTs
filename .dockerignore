@@ -5,3 +5,7 @@ Dockerfile
 .git
 node_modules
 __pycache__
+.env
+*.local
+.vscode/
+.idea/
