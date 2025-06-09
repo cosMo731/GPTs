@@ -10,6 +10,7 @@ ARG TARGET_ENV
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make \
+    && pip install --no-cache-dir uv \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir -r requirements.txt
@@ -18,6 +19,7 @@ COPY . .
 ##### Node.js SAST stage #####
 FROM node:18-bullseye-slim AS sast-node
 RUN --mount=type=cache,target=/root/.npm npm install -g eslint
+COPY --from=build /app /app
 
 ##### Python SAST stage #####
 FROM python:3.12-slim AS sast-python
@@ -38,14 +40,16 @@ ARG TARGET_ENV
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY --from=build /app/requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir Django uvicorn && \
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir -r requirements.txt && \
     if [ "$TARGET_ENV" = "develop" ]; then pip install --no-cache-dir debugpy; fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/myproject ./myproject
 COPY --from=build /app/manage.py ./
-CMD ["gunicorn", "myproject.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+ENTRYPOINT ["gunicorn", "myproject.asgi:application", "-k", "uvicorn.workers.UvicornWorker"]
+CMD ["--bind", "0.0.0.0:8000"]
 
 ##### Test runtime stage: server with pytest #####
 FROM runtime AS test-runtime
 ARG TARGET_ENV
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
+

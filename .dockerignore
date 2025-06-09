@@ -1,3 +1,4 @@
+# Exclude docs and CI configuration to keep build context small
 *.md
 .gitlab-ci.yml
 AGENTS.md

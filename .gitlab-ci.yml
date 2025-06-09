@@ -19,14 +19,14 @@ workflow:
 default:
   image: docker:20.10
   services:
-    - name: docker:20.10-dind-rootless
+    - name: docker:20.10-dind
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
-  before_script:
-    - docker info
+  before_script: []
+  privileged: true
   cache:
     key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
     policy: pull-push
@@ -45,13 +45,18 @@ stages:
 build_base_images:
   stage: build
   script:
+    - docker pull myapp-build:latest || true
+    - docker pull myapp-sast-node:latest || true
+    - docker pull myapp-sast-python:latest || true
+    - docker pull myapp-test:latest || true
+    - docker pull myapp-test-runtime:latest || true
     - |
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target build --cache-from=myapp-build:latest -t myapp-build:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast-node --cache-from=myapp-sast-node:latest -t myapp-sast-node:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast-python --cache-from=myapp-sast-python:latest -t myapp-sast-python:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target test-runtime --cache-from=myapp-test-runtime:latest -t myapp-test-runtime:${CI_COMMIT_SHA} .
-      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target runtime -t myapp:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_COMMIT_REF_SLUG} --target build --cache-from=myapp-build:latest -t myapp-build:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_COMMIT_REF_SLUG} --target sast-node --cache-from=myapp-sast-node:latest -t myapp-sast-node:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_COMMIT_REF_SLUG} --target sast-python --cache-from=myapp-sast-python:latest -t myapp-sast-python:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_COMMIT_REF_SLUG} --target test --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_COMMIT_REF_SLUG} --target test-runtime --cache-from=myapp-test-runtime:latest -t myapp-test-runtime:${CI_COMMIT_SHA} .
+      docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_COMMIT_REF_SLUG} --target runtime -t myapp:${CI_COMMIT_SHA} .
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
 
@@ -59,7 +64,7 @@ build_base_images:
 front_sast:
   stage: test
   script:
-    - docker run --rm myapp-sast-node:${CI_COMMIT_SHA} sh -c 'eslint . -f sarif -o eslint.sarif'
+    - docker run --rm myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app && eslint . -f sarif -o eslint.sarif'
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
   needs:
@@ -129,6 +134,10 @@ terraform_init:
   rules:
     - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
   when: on_success
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_REGION: $AWS_REGION
 
 terraform_plan:
   stage: deploy
@@ -141,6 +150,10 @@ terraform_plan:
   needs:
     - terraform_init
   when: on_success
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_REGION: $AWS_REGION
 
 terraform_apply:
   stage: deploy
@@ -153,6 +166,10 @@ terraform_apply:
   needs:
     - terraform_plan
   when: on_success
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_REGION: $AWS_REGION
 
 dev_deploy:
   stage: deploy
