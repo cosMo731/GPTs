@@ -13,12 +13,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
-# Dependencies are installed from requirements.txt. Using a lock file (pip-tools/Poetry)
-# would ensure deterministic builds.
+# Build dependency wheels first so later source changes do not invalidate cache
 RUN --mount=type=cache,target=/root/.cache/pip pip wheel -r requirements.txt --wheel-dir=/tmp/wheels \
     && find /tmp/wheels -name '*.so' -exec strip --strip-unneeded {} + || true \
     && apt-get purge -y gcc make curl && apt-get clean && rm -rf /var/lib/apt/lists/*
-COPY . .
+COPY myproject ./myproject
+COPY manage.py ./
 
 ##### Node.js SAST stage #####
 FROM node:18-bullseye-slim AS sast-node
@@ -28,6 +28,8 @@ COPY --from=build /app /app
 ##### Python SAST stage #####
 FROM python:3.12-slim AS sast-python
 ARG TFSEC_VERSION
+# TODO: set the correct SHA256 of the tfsec binary when available
+ARG TFSEC_SHA256
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir ruff && \
     ARCH=$(uname -m); \
     case "$ARCH" in \
@@ -36,6 +38,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir ruff &
       *) TFSEC_BIN=tfsec-linux-amd64 ;; \
     esac && \
     curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/${TFSEC_BIN} -o /usr/local/bin/tfsec && \
+    if [ -n "$TFSEC_SHA256" ]; then echo "$TFSEC_SHA256  /usr/local/bin/tfsec" | sha256sum -c -; fi && \
     chmod +x /usr/local/bin/tfsec
 COPY --from=build /app /app
 
@@ -49,7 +52,9 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
 ##### Runtime stage: minimal image to run Django #####
 FROM python:3.12-slim AS runtime
 ARG TARGET_ENV
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    GUNICORN_TIMEOUT=120 \
+    GUNICORN_GRACEFUL_TIMEOUT=90
 WORKDIR /app
 COPY --from=build /app/requirements.txt ./
 COPY --from=build /tmp/wheels /tmp/wheels
@@ -58,8 +63,10 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir --no-i
     rm -rf /tmp/wheels && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/myproject ./myproject
 COPY --from=build /app/manage.py ./
-ENTRYPOINT ["gunicorn", "myproject.asgi:application", "-k", "uvicorn.workers.UvicornWorker"]
-CMD ["--bind", "0.0.0.0:8000"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+CMD []
 
 ##### Test runtime stage: server with pytest #####
 FROM runtime AS test-runtime

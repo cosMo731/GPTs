@@ -15,24 +15,24 @@ workflow:
       when: always
     - when: never
 
-# Docker-in-Docker runner using rootless mode
+# Docker-in-Docker runner with BuildKit enabled
 default:
-  image: docker:20.10
+  image: docker:24
   services:
-    - name: docker:20.10-dind-rootless
+    - name: docker:24-dind
       alias: docker
+  tags: ["runner17"]
   variables:
-    DOCKER_HOST: unix:///run/user/1000/docker.sock
+    DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
-    MASK_SECRETS: "true"  # Runner 17+ required for masking
-    # NOTE: rootless dind may fail to push images. Consider BuildKit or Kaniko.
+    MASK_SECRETS: "true"
     TFSEC_VERSION: "1.28.1"
   before_script:
-    # Login to GitLab Container Registry for pulling and pushing build caches
+    - docker info
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   cache:
-    key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG-$CI_PIPELINE_ID"
+    key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
     policy: pull-push
     paths:
       - .cache/pip
@@ -48,41 +48,22 @@ stages:
 # Build base images for all stages
 # NOTE: Images are built separately for clarity. They could be consolidated
 # using `docker buildx bake` for further optimization.
-build_base_images:
+build_images:
   stage: build
   script:
-    - docker pull $CI_REGISTRY_IMAGE/myapp-build:latest || true
-    - docker pull $CI_REGISTRY_IMAGE/myapp-sast-node:latest || true
-    - docker pull $CI_REGISTRY_IMAGE/myapp-sast-python:latest || true
-    - docker pull $CI_REGISTRY_IMAGE/myapp-test:latest || true
-    - docker pull $CI_REGISTRY_IMAGE/myapp-test-runtime:latest || true
+    - docker buildx create --use
     - |
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
-        --target build --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache \
-        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:cache,mode=max \
-        -t $CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA} .
-      docker push $CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA}
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
-        --target sast-node --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache \
-        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-node:cache,mode=max \
-        -t $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} .
-      docker push $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA}
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --build-arg TFSEC_VERSION=${TFSEC_VERSION} \
-        --target sast-python --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache \
-        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-sast-python:cache,mode=max \
-        -t $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} .
-      docker push $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA}
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
-        --target test --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache \
-        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test:cache,mode=max \
-        -t $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} .
-      docker push $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA}
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} \
-        --target test-runtime --cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache \
-        --cache-to=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-test-runtime:cache,mode=max \
-        -t $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} .
-      docker push $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
-      docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target runtime -t myapp:${CI_COMMIT_SHA} .
+      docker buildx bake -f docker-bake.hcl all \
+        --set *.args.TARGET_ENV=${CI_COMMIT_REF_NAME} \
+        --set build.tags=$CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA},$CI_REGISTRY_IMAGE/myapp-build:latest \
+        --set sast-node.tags=$CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} \
+        --set sast-python.tags=$CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} \
+        --set test.tags=$CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
+        --set test-runtime.tags=$CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
+        --set runtime.tags=$CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} \
+        --set *.cache-from=type=registry,ref=$CI_REGISTRY_IMAGE/myapp-build:latest \
+        --set *.cache-to=type=inline \
+        --push
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
 
@@ -94,7 +75,7 @@ front_sast:
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
   needs:
-    - build_base_images
+    - build_images
   artifacts:
     reports:
       sast: eslint.sarif
@@ -107,7 +88,7 @@ backend_sast:
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
   needs:
-    - build_base_images
+    - build_images
   artifacts:
     reports:
       sast: ruff.sarif
@@ -120,7 +101,7 @@ tf_sast:
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
   needs:
-    - build_base_images
+    - build_images
   artifacts:
     reports:
       sast: tfsec.sarif
@@ -133,7 +114,7 @@ unit_tests:
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ "^(develop|release)$" || $CI_COMMIT_TAG'
   needs:
-    - build_base_images
+    - build_images
   artifacts:
     reports:
       junit: junit.xml
@@ -142,7 +123,8 @@ unit_tests:
 functional_tests:
   stage: test
   script:
-    - docker run -d --name django_app --network none $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
+    - docker network create ci_bridge || true
+    - docker run -d --name django_app --network ci_bridge $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
   rules:
@@ -159,6 +141,7 @@ terraform_init:
     - terraform init
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
   when: on_success
   variables:
     AWS_REGION: $AWS_REGION
@@ -197,7 +180,8 @@ terraform_apply:
 dev_deploy:
   stage: deploy
   script:
-    - docker tag myapp:${CI_COMMIT_SHA} myapp:dev-${CI_COMMIT_SHORT_SHA}
+    - docker pull $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA}
+    - docker tag $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} myapp:dev-${CI_COMMIT_SHORT_SHA}
     - echo "Deploying container to EC2 filesystem"
   rules:
     - if: '$CI_COMMIT_REF_NAME == "develop"'
@@ -207,12 +191,14 @@ dev_deploy:
 build_image:
   stage: deploy
   script:
+    - docker pull $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA}
     - |
       DATE_TAG=$(date +%Y%m%d.%H%M)-${CI_COMMIT_SHORT_SHA}
-      docker tag myapp:${CI_COMMIT_SHA} myapp:${DATE_TAG}
+      docker tag $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} myapp:${DATE_TAG}
       echo $DATE_TAG > image_tag.txt
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
   needs:
     - terraform_apply
   artifacts:
@@ -231,6 +217,7 @@ push_image:
     - docker push $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
   needs:
     - build_image
   variables:
