@@ -43,8 +43,8 @@ stages:
 # ---- Build stage ----
 
 # Build base images for all stages
-# NOTE: Ideally these images should be produced with buildx in a single command
-# to avoid redundant parsing. This sample keeps separate commands for clarity.
+# NOTE: Images are built separately for clarity. They could be consolidated
+# using `docker buildx bake` for further optimization.
 build_base_images:
   stage: build
   script:
@@ -55,13 +55,18 @@ build_base_images:
     - docker pull myapp-test-runtime:latest || true
     - |
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target build --cache-from=myapp-build:latest -t myapp-build:${CI_COMMIT_SHA} .
+      docker push myapp-build:${CI_COMMIT_SHA} || true  # TODO: set registry
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target sast-node --cache-from=myapp-sast-node:latest -t myapp-sast-node:${CI_COMMIT_SHA} .
+      docker push myapp-sast-node:${CI_COMMIT_SHA} || true  # TODO: set registry
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --build-arg TFSEC_VERSION=${TFSEC_VERSION} --target sast-python --cache-from=myapp-sast-python:latest -t myapp-sast-python:${CI_COMMIT_SHA} .
+      docker push myapp-sast-python:${CI_COMMIT_SHA} || true  # TODO: set registry
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target test --cache-from=myapp-test:latest -t myapp-test:${CI_COMMIT_SHA} .
+      docker push myapp-test:${CI_COMMIT_SHA} || true  # TODO: set registry
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target test-runtime --cache-from=myapp-test-runtime:latest -t myapp-test-runtime:${CI_COMMIT_SHA} .
+      docker push myapp-test-runtime:${CI_COMMIT_SHA} || true  # TODO: set registry
       docker build --build-arg TARGET_ENV=${CI_COMMIT_REF_NAME} --target runtime -t myapp:${CI_COMMIT_SHA} .
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$"'
+    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
 
 # ---- Test stage ----
 front_sast:
@@ -69,7 +74,7 @@ front_sast:
   script:
     - docker run --rm myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app/frontend 2>/dev/null || cd /app && eslint . -f sarif -o eslint.sarif'
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$"'
+    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
   needs:
     - build_base_images
   artifacts:
@@ -82,7 +87,7 @@ backend_sast:
   script:
     - docker run --rm myapp-sast-python:${CI_COMMIT_SHA} sh -c 'ruff . --output-format sarif > ruff.sarif'
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$"'
+    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
   needs:
     - build_base_images
   artifacts:
@@ -95,7 +100,7 @@ tf_sast:
   script:
     - docker run --rm myapp-sast-python:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec.sarif'
   rules:
-    - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
   needs:
     - build_base_images
   artifacts:
@@ -108,7 +113,7 @@ unit_tests:
   script:
     - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(develop|release)$"'
+    - if: '$CI_COMMIT_REF_NAME =~ "^(develop|release)$" || $CI_COMMIT_TAG'
   needs:
     - build_base_images
   artifacts:
@@ -119,7 +124,8 @@ unit_tests:
 functional_tests:
   stage: test
   script:
-    - docker run -d --name django_app --network host myapp-test-runtime:${CI_COMMIT_SHA}
+    - PORT=$(shuf -i 8000-9000 -n 1)
+    - docker run -d --name django_app -p ${PORT}:8000 myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
   rules:
@@ -139,9 +145,7 @@ terraform_init:
   when: on_success
   variables:
     AWS_REGION: $AWS_REGION
-  secrets:
-    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
-    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  # AWS credentials are supplied via protected variables
 
 terraform_plan:
   stage: deploy
@@ -156,9 +160,7 @@ terraform_plan:
   when: on_success
   variables:
     AWS_REGION: $AWS_REGION
-  secrets:
-    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
-    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  # AWS credentials are supplied via protected variables
 
 terraform_apply:
   stage: deploy
@@ -173,9 +175,7 @@ terraform_apply:
   when: on_success
   variables:
     AWS_REGION: $AWS_REGION
-  secrets:
-    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
-    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  # AWS credentials are supplied via protected variables
 
 dev_deploy:
   stage: deploy
@@ -218,6 +218,4 @@ push_image:
     - build_image
   variables:
     MASK_SECRETS: 'true'
-  secrets:
-    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
-    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  # AWS credentials are supplied via protected variables
