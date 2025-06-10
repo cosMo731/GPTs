@@ -3,6 +3,7 @@
 # Stage layout: deps -> build -> sast-node -> sast-python -> test -> runtime -> test-runtime
 
 ARG TARGET_ENV=develop
+ARG MY_CI_IMAGE
 ARG TFSEC_VERSION=1.28.1
 
 ##### deps stage: build dependency wheels #####
@@ -18,13 +19,11 @@ RUN --mount=type=cache,target=/root/.cache/pip pip wheel -r requirements.txt --w
 
 ##### build stage: install uv and application code #####
 FROM python:3.12-slim AS build
-ARG TARGET_ENV
 WORKDIR /app
 COPY --from=deps /tmp/wheels /tmp/wheels
-# Build stage installs application code; uv is no longer required
+# Build stage installs application code
 COPY myproject ./myproject
 COPY manage.py ./
-COPY requirements.txt ./
 
 ##### Node.js SAST stage #####
 FROM node:18-bullseye-slim AS sast-node
@@ -49,17 +48,19 @@ COPY --from=build /app /app
 
 ##### test stage: pytest only #####
 FROM build AS test
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir /tmp/wheels/* && \
+    pip install --no-cache-dir pytest
 
 ##### runtime stage: minimal image #####
 FROM python:3.12-slim AS runtime
-ARG TARGET_ENV
 ENV PYTHONUNBUFFERED=1 \
     GUNICORN_TIMEOUT=120 \
     GUNICORN_GRACEFUL_TIMEOUT=90
 WORKDIR /app
 COPY --from=deps /tmp/wheels /tmp/wheels
 RUN --mount=type=cache,target=/root/.cache/pip pip install /tmp/wheels/* && \
+    pip install --no-cache-dir uvicorn && \
     rm -rf /tmp/wheels && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY myproject ./myproject
 COPY manage.py ./
@@ -70,4 +71,4 @@ CMD []
 
 ##### test runtime stage #####
 FROM runtime AS test-runtime
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir pytest ruff

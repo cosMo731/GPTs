@@ -17,26 +17,43 @@ workflow:
 
 # Docker-out-of-Docker runner with BuildKit enabled
 default:
-  image: docker:24
+  # Custom CI image built from Dockerfile. Set `MY_CI_IMAGE` in CI variables.
+  image: $MY_CI_IMAGE
+  services:
+    - name: docker:dind
+      alias: docker
   tags: ["runner17"]
   variables:
     DOCKER_HOST: unix:///var/run/docker.sock
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
     TFSEC_VERSION: "1.28.1"
-  before_script:
-    - docker info
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  before_script: []
+  privileged: true
   cache:
-    key: "$CI_PROJECT_ID-$CI_JOB_NAME-$CI_PIPELINE_ID"
+    key: "$CI_PROJECT_ID-$CI_COMMIT_REF_SLUG-$CI_JOB_NAME"
     policy: pull-push
     paths:
       - .cache/pip
       - .npm
 
+.docker_setup: &docker_setup
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+.sast_template: &sast_template
+  stage: test
+  extends: .docker_setup
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^(feature|develop|release)(\/.*)?$/ || $CI_COMMIT_TAG'
+  needs:
+    - build_images
+  artifacts:
+    expire_in: 1 week
+
 stages:
   - build
-  - static
   - test
   - deploy
 
@@ -47,6 +64,7 @@ stages:
 # using `docker buildx bake` for further optimization.
 build_images:
   stage: build
+  extends: .docker_setup
   script:
     - |
       BUILDER=builder-${CI_PIPELINE_ID}
@@ -76,43 +94,68 @@ build_images:
     - docker buildx stop $BUILDER || true
     - docker buildx rm $BUILDER || true
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_REF_NAME =~ /^feature\/.*$/ || $CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/ || $CI_COMMIT_REF_NAME =~ /^release(\/.*)?$/ || $CI_COMMIT_TAG'
+
+frontend_build:
+  stage: build
+  image: node:18-bullseye-slim
+  variables:
+    NODE_ENV: production
+  script:
+    - cd frontend
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - frontend/dist
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
 
 # ---- Test stage ----
-front_sast:
+volume_sast_unit:
   stage: test
+  extends: .docker_setup
   script:
-    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app/frontend 2>/dev/null || cd /app && eslint . -f sarif -o eslint.sarif'
+    - docker run --rm \
+        -v "$CI_PROJECT_DIR:/app" \
+        -w /app \
+        $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
+        sh -c 'ruff . --output-format sarif > ruff-volume.sarif && pytest --junitxml=unit-volume.xml tests/unit'
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+  artifacts:
+    reports:
+      sast: ruff-volume.sarif
+      junit: unit-volume.xml
+    expire_in: 1 week
   needs:
     - build_images
+
+front_sast:
+  <<: *sast_template
+  script:
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app/frontend 2>/dev/null || cd /app && eslint . -f sarif -o eslint.sarif'
   artifacts:
     reports:
       sast: eslint.sarif
     expire_in: 1 week
 
 backend_sast:
-  stage: test
+  <<: *sast_template
   script:
     - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} sh -c 'ruff . --output-format sarif > ruff.sarif'
-  rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
-  needs:
-    - build_images
   artifacts:
     reports:
       sast: ruff.sarif
     expire_in: 1 week
 
 tf_sast:
-  stage: test
+  <<: *sast_template
   script:
     - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec.sarif'
   rules:
     - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
-  needs:
-    - build_images
   artifacts:
     reports:
       sast: tfsec.sarif
@@ -120,10 +163,15 @@ tf_sast:
 
 unit_tests:
   stage: test
+  extends: .docker_setup
   script:
-    - docker run --rm $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
+    - docker run --rm \
+        -v "$CI_PROJECT_DIR:/app" \
+        -w /app \
+        $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
+        pytest --junitxml=junit.xml tests/unit
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(develop|release)$" || $CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/ || $CI_COMMIT_REF_NAME =~ /^release(\/.*)?$/ || $CI_COMMIT_TAG'
   needs:
     - build_images
   artifacts:
@@ -132,20 +180,26 @@ unit_tests:
     expire_in: 1 week
 
 shell_lint:
-  stage: static
+  stage: test
   image: koalaman/shellcheck-alpine
   script:
     - shellcheck entrypoint.sh
   rules:
-    - if: '$CI_COMMIT_REF_NAME =~ "^(feature|develop|release)$" || $CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_REF_NAME =~ /^feature\/.*$/ || $CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/ || $CI_COMMIT_REF_NAME =~ /^release(\/.*)?$/ || $CI_COMMIT_TAG'
   needs: []
 
 functional_tests:
   stage: test
+  extends: .docker_setup
   script:
     - NETWORK=ci_bridge_${CI_PIPELINE_ID}
     - docker network create $NETWORK || true
-    - docker run -d --name django_app --network $NETWORK $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
+    - docker run -d \
+        --name django_app \
+        --network $NETWORK \
+        -v "$CI_PROJECT_DIR:/app" \
+        -w /app \
+        $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
     - docker exec django_app pytest tests/functional
     - docker stop django_app
   after_script:
@@ -171,6 +225,8 @@ terraform_init:
   variables:
     AWS_REGION: $AWS_REGION
   # AWS credentials are supplied via protected variables
+  needs:
+    - functional_tests
 
 terraform_plan:
   stage: deploy
@@ -210,17 +266,19 @@ terraform_apply:
 
 dev_deploy:
   stage: deploy
+  extends: .docker_setup
   script:
     - docker pull $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA}
     - docker tag $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} myapp:dev-${CI_COMMIT_SHORT_SHA}
     - echo "Deploying container to EC2 filesystem"
   rules:
-    - if: '$CI_COMMIT_REF_NAME == "develop"'
+    - if: '$CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/'
   needs:
     - functional_tests
 
 build_image:
   stage: deploy
+  extends: .docker_setup
   script:
     - docker pull $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA}
     - |
@@ -238,11 +296,12 @@ build_image:
 
 push_image:
   stage: deploy
-  image: amazon/aws-cli:latest
+  image: docker:24
+  before_script:
+    - apk add --no-cache python3 py3-pip
+    - pip install awscli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_ACCOUNT_URL
   script:
-    - set +x
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin --quiet $AWS_ECR_ACCOUNT_URL
-    - set -x
     - DATE_TAG=$(cat image_tag.txt)
     - docker tag myapp:${DATE_TAG} $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
     - docker push $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
@@ -252,3 +311,17 @@ push_image:
   needs:
     - build_image
   # AWS credentials are supplied via protected variables
+
+deploy_frontend:
+  stage: deploy
+  image: amazon/aws-cli:latest
+  dependencies:
+    - frontend_build
+  needs:
+    - frontend_build
+  script:
+    - aws s3 sync frontend/dist s3://$S3_BUCKET_NAME --delete
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+  variables:
+    AWS_REGION: $AWS_DEFAULT_REGION
