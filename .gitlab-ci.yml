@@ -1,0 +1,327 @@
+# GitLab CI/CD pipeline for Django and Vue application
+---
+# Stages: build -> test -> deploy
+# Release MRs run the full pipeline including Terraform and image push
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "tag"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - when: never
+
+# Docker-out-of-Docker runner with BuildKit enabled
+default:
+  # Custom CI image built from Dockerfile. Set `MY_CI_IMAGE` in CI variables.
+  image: $MY_CI_IMAGE
+  services:
+    - name: docker:dind
+      alias: docker
+  tags: ["runner17"]
+  variables:
+    DOCKER_HOST: unix:///var/run/docker.sock
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: "1"
+    TFSEC_VERSION: "1.28.1"
+  before_script: []
+  privileged: true
+  cache:
+    key: "$CI_PROJECT_ID-$CI_COMMIT_REF_SLUG-$CI_JOB_NAME"
+    policy: pull-push
+    paths:
+      - .cache/pip
+      - .npm
+
+.docker_setup: &docker_setup
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+.sast_template: &sast_template
+  stage: test
+  extends: .docker_setup
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^(feature|develop|release)(\/.*)?$/ || $CI_COMMIT_TAG'
+  needs:
+    - build_images
+  artifacts:
+    expire_in: 1 week
+
+stages:
+  - build
+  - test
+  - deploy
+
+# ---- Build stage ----
+
+# Build base images for all stages
+# NOTE: Images are built separately for clarity. They could be consolidated
+# using `docker buildx bake` for further optimization.
+build_images:
+  stage: build
+  extends: .docker_setup
+  script:
+    - |
+      BUILDER=builder-${CI_PIPELINE_ID}
+      docker buildx inspect $BUILDER >/dev/null 2>&1 || \
+        docker buildx create --name $BUILDER --use
+    - |
+      ARCH=$(uname -m)
+      case "$ARCH" in
+        aarch64) TFSEC_BIN=tfsec-linux-arm64 ;;
+        armv7l) TFSEC_BIN=tfsec-linux-armv7 ;;
+        *) TFSEC_BIN=tfsec-linux-amd64 ;;
+      esac
+      TFSEC_SHA256=$(curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/checksums.txt | grep ${TFSEC_BIN} | awk '{print $1}')
+    - |
+      docker buildx bake -f docker-bake.hcl all \
+        --set *.args.TARGET_ENV=${CI_COMMIT_REF_NAME} \
+        --set build.tags=$CI_REGISTRY_IMAGE/myapp-build:${CI_COMMIT_SHA},$CI_REGISTRY_IMAGE/myapp-build:latest \
+        --set sast-node.tags=$CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} \
+        --set sast-python.tags=$CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} \
+        --set sast-python.args.TFSEC_VERSION=${TFSEC_VERSION} \
+        --set sast-python.args.TFSEC_SHA256=${TFSEC_SHA256} \
+        --set test.tags=$CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
+        --set test-runtime.tags=$CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
+        --set runtime.tags=$CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA},$CI_REGISTRY_IMAGE/myapp-runtime:latest \
+        --push
+  after_script:
+    - docker buildx stop $BUILDER || true
+    - docker buildx rm $BUILDER || true
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^feature\/.*$/ || $CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/ || $CI_COMMIT_REF_NAME =~ /^release(\/.*)?$/ || $CI_COMMIT_TAG'
+
+frontend_build:
+  stage: build
+  image: node:18-bullseye-slim
+  variables:
+    NODE_ENV: production
+  script:
+    - cd frontend
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - frontend/dist
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+
+# ---- Test stage ----
+volume_sast_unit:
+  stage: test
+  extends: .docker_setup
+  script:
+    - docker run --rm \
+        -v "$CI_PROJECT_DIR:/app" \
+        -w /app \
+        $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA} \
+        sh -c 'ruff . --output-format sarif > ruff-volume.sarif && pytest --junitxml=unit-volume.xml tests/unit'
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+  artifacts:
+    reports:
+      sast: ruff-volume.sarif
+      junit: unit-volume.xml
+    expire_in: 1 week
+  needs:
+    - build_images
+
+front_sast:
+  <<: *sast_template
+  script:
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-node:${CI_COMMIT_SHA} sh -c 'cd /app/frontend 2>/dev/null || cd /app && eslint . -f sarif -o eslint.sarif'
+  artifacts:
+    reports:
+      sast: eslint.sarif
+    expire_in: 1 week
+
+backend_sast:
+  <<: *sast_template
+  script:
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} sh -c 'ruff . --output-format sarif > ruff.sarif'
+  artifacts:
+    reports:
+      sast: ruff.sarif
+    expire_in: 1 week
+
+tf_sast:
+  <<: *sast_template
+  script:
+    - docker run --rm $CI_REGISTRY_IMAGE/myapp-sast-python:${CI_COMMIT_SHA} sh -c 'tfsec /app/terraform --format sarif > tfsec.sarif'
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
+  artifacts:
+    reports:
+      sast: tfsec.sarif
+    expire_in: 1 week
+
+unit_tests:
+  stage: test
+  extends: .docker_setup
+  script:
+    - docker run --rm \
+        -v "$CI_PROJECT_DIR:/app" \
+        -w /app \
+        $CI_REGISTRY_IMAGE/myapp-test:${CI_COMMIT_SHA} \
+        pytest --junitxml=junit.xml tests/unit
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/ || $CI_COMMIT_REF_NAME =~ /^release(\/.*)?$/ || $CI_COMMIT_TAG'
+  needs:
+    - build_images
+  artifacts:
+    reports:
+      junit: junit.xml
+    expire_in: 1 week
+
+shell_lint:
+  stage: test
+  image: koalaman/shellcheck-alpine
+  script:
+    - shellcheck entrypoint.sh
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^feature\/.*$/ || $CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/ || $CI_COMMIT_REF_NAME =~ /^release(\/.*)?$/ || $CI_COMMIT_TAG'
+  needs: []
+
+functional_tests:
+  stage: test
+  extends: .docker_setup
+  script:
+    - NETWORK=ci_bridge_${CI_PIPELINE_ID}
+    - docker network create $NETWORK || true
+    - docker run -d \
+        --name django_app \
+        --network $NETWORK \
+        -v "$CI_PROJECT_DIR:/app" \
+        -w /app \
+        $CI_REGISTRY_IMAGE/myapp-test-runtime:${CI_COMMIT_SHA}
+    - docker exec django_app pytest tests/functional
+    - docker stop django_app
+  after_script:
+    - docker rm django_app || true
+    - docker network rm $NETWORK || true
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release" || $CI_COMMIT_TAG'
+  needs:
+    - unit_tests
+
+# ---- Deploy stage ----
+terraform_init:
+  stage: deploy
+  image: hashicorp/terraform:1.5.6
+  tags: ["runner17", "terraform"]
+  script:
+    - terraform init
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+      when: on_success
+  variables:
+    AWS_REGION: $AWS_REGION
+  # AWS credentials are supplied via protected variables
+  needs:
+    - functional_tests
+
+terraform_plan:
+  stage: deploy
+  image: hashicorp/terraform:1.5.6
+  tags: ["runner17", "terraform"]
+  script:
+    - terraform plan -out=tfplan
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+      when: on_success
+  needs:
+    - terraform_init
+  when: on_success
+  variables:
+    AWS_REGION: $AWS_REGION
+  # AWS credentials are supplied via protected variables
+
+terraform_apply:
+  stage: deploy
+  image: hashicorp/terraform:1.5.6
+  tags: ["runner17", "terraform"]
+  script:
+    - terraform apply -auto-approve tfplan
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+      when: on_success
+  needs:
+    - terraform_plan
+  when: on_success
+  variables:
+    AWS_REGION: $AWS_REGION
+  # AWS credentials are supplied via protected variables
+
+dev_deploy:
+  stage: deploy
+  extends: .docker_setup
+  script:
+    - docker pull $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA}
+    - docker tag $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} myapp:dev-${CI_COMMIT_SHORT_SHA}
+    - echo "Deploying container to EC2 filesystem"
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^develop(\/.*)?$/'
+  needs:
+    - functional_tests
+
+build_image:
+  stage: deploy
+  extends: .docker_setup
+  script:
+    - docker pull $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA}
+    - |
+      DATE_TAG=$(date +%Y%m%d.%H%M)-${CI_COMMIT_SHORT_SHA}
+      docker tag $CI_REGISTRY_IMAGE/myapp-runtime:${CI_COMMIT_SHA} myapp:${DATE_TAG}
+      echo $DATE_TAG > image_tag.txt
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+  needs:
+    - terraform_apply
+  artifacts:
+    paths:
+      - image_tag.txt
+
+push_image:
+  stage: deploy
+  image: docker:24
+  before_script:
+    - apk add --no-cache python3 py3-pip
+    - pip install awscli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_ACCOUNT_URL
+  script:
+    - DATE_TAG=$(cat image_tag.txt)
+    - docker tag myapp:${DATE_TAG} $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
+    - docker push $AWS_ECR_ACCOUNT_URL/myapp:${DATE_TAG}
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^v/'
+  needs:
+    - build_image
+  # AWS credentials are supplied via protected variables
+
+deploy_frontend:
+  stage: deploy
+  image: amazon/aws-cli:latest
+  dependencies:
+    - frontend_build
+  needs:
+    - frontend_build
+  script:
+    - aws s3 sync frontend/dist s3://$S3_BUCKET_NAME --delete
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "release"'
+  variables:
+    AWS_REGION: $AWS_DEFAULT_REGION
