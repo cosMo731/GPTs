@@ -1,176 +1,74 @@
-# GitLab CI/CD pipeline for Django and Vue application
-# Stages: build -> test -> deploy
-# Release MRs run the full pipeline including Terraform and image push
+image: $MY_CI_IMAGE
 
-workflow:
-  rules:
-    - if: $CI_MERGE_REQUEST_ID
-      when: always
-    - when: never
+services:
+  - name: docker:24-dind
+    alias: docker
 
-# Docker-in-Docker runner using custom CI image
-default:
-  image: myregistry/my-ci-image:latest
-  services:
-    - name: docker:dind
-      alias: docker
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-  before_script:
-    - docker info
-  cache:
-    key: "$CI_PROJECT_ID-$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cache/pip
-      - .npm
-  privileged: true
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
 
 stages:
-  - build
-  - test
-  - deploy
+  - release_deploy
+  - create_ecr
+  - create_s3
+  - front_build
+  - Push_to_S3
+  - sast
+  - unittest
+  - func_test
+  - image_build
+  - push_to_ECR
 
-# ---- Build stage ----
-# Build base image for feature branches
-mr_setup:
-  stage: build
+release_deploy:
+  stage: release_deploy
   script:
-    - docker build --build-arg TARGET_ENV=feature --target build -t myapp-build:${CI_COMMIT_SHA} .
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "feature"'
+    - docker run --rm -v ${CI_PROJECT_DIR}/app/backend:/app \
+        $CI_REGISTRY_IMAGE/backend:latest \
+        python manage.py migrate
 
-# Build SAST image once per pipeline
-build_sast_image:
-  stage: build
+create_ecr:
+  stage: create_ecr
   script:
-    - docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - mr_setup
+    - terraform -chdir=infra init
+    - terraform -chdir=infra apply -target=module.ecr -auto-approve
 
-# ---- Test stage ----
-front_sast:
-  stage: test
+create_s3:
+  stage: create_s3
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} eslint .
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - build_sast_image
-  artifacts:
-    paths:
-      - eslint-report.txt
+    - terraform -chdir=infra init
+    - terraform -chdir=infra apply -target=module.storage -auto-approve
 
-backend_sast:
-  stage: test
+front_build:
+  stage: front_build
+  image: node:16
+  services: []
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} ruff . > ruff-report.txt
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - front_sast
-  artifacts:
-    paths:
-      - ruff-report.txt
+    - cd app/frontend
+    - npm install
+    - npm run build
 
-tf_sast:
-  stage: test
+Push_to_S3:
+  stage: Push_to_S3
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} tfsec /app/terraform > tfsec-report.txt
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - backend_sast
-  artifacts:
-    paths:
-      - tfsec-report.txt
+    - aws s3 sync app/frontend/dist s3://$S3_BUCKET --delete
 
-unit_tests:
-  stage: test
+image_build:
+  stage: image_build
   script:
-    - docker build --build-arg TARGET_ENV=release --target test -t myapp-test:${CI_COMMIT_SHA} .
-    - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - tf_sast
-  artifacts:
-    reports:
-      junit: junit.xml
-    expire_in: 1 week
+    - docker build -t $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA app/backend/
 
-functional_tests:
-  stage: test
+push_to_ECR:
+  stage: push_to_ECR
+  before_script:
+    - aws --version
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $CI_REGISTRY
   script:
-    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp-runtime:${CI_COMMIT_SHA} .
-    - docker run -d --name django_app -p 8000:8000 myapp-runtime:${CI_COMMIT_SHA}
-    - docker exec django_app pytest tests/functional
-    - docker stop django_app
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - unit_tests
+    - docker push $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA
 
-# ---- Deploy stage ----
-terraform_init:
-  stage: deploy
-  image: hashicorp/terraform:1.5.6
-  script:
-    - terraform init
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - functional_tests
-
-terraform_plan:
-  stage: deploy
-  image: hashicorp/terraform:1.5.6
-  script:
-    - terraform plan -out=tfplan
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - terraform_init
-
-terraform_apply:
-  stage: deploy
-  image: hashicorp/terraform:1.5.6
-  script:
-    - terraform apply -auto-approve tfplan
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - terraform_plan
-
-dev_deploy:
-  stage: deploy
-  script:
-    - docker build --build-arg TARGET_ENV=develop --target runtime -t myapp:dev-${CI_COMMIT_SHA} .
-    - echo "Deploying container to EC2 filesystem"
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
-  needs:
-    - tf_sast
-
-build_image:
-  stage: deploy
-  script:
-    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp:${CI_COMMIT_SHA} .
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - terraform_apply
-
-push_image:
-  stage: deploy
-  image: amazon/aws-cli:latest
-  script:
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_ACCOUNT_URL
-    - docker tag myapp:${CI_COMMIT_SHA} $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
-    - docker push $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - build_image
+variables:
+  MY_CI_IMAGE:        $MY_CI_IMAGE
+  AWS_ACCESS_KEY_ID:     $AWS_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  AWS_DEFAULT_REGION:    ap-northeast-1
+  S3_BUCKET:             your-vue-s3-bucket-name
