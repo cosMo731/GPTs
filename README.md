@@ -20,6 +20,11 @@ frontend. Built frontend files are uploaded to S3 for static hosting.
 CI/CD workflows are defined in `.gitlab-ci.yml` and expect AWS credentials and
 an S3 bucket name to be configured in GitLab CI/CD variables.
 
+The pipeline includes steps to create the ECR repository and S3 bucket via
+Terraform before building Docker images and uploading the frontend build
+artifacts. Ensure `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+`MY_CI_IMAGE` are set so these stages can run.
+
 ## CI Docker Image
 
 `ci/Dockerfile` builds a job image for GitLab Runner. It contains Docker CLI,

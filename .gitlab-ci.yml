@@ -10,6 +10,8 @@ variables:
 
 stages:
   - release_deploy
+  - create_ecr
+  - create_s3
   - front_build
   - Push_to_S3
   - sast
@@ -24,6 +26,18 @@ release_deploy:
     - docker run --rm -v ${CI_PROJECT_DIR}/app/backend:/app \
         $CI_REGISTRY_IMAGE/backend:latest \
         python manage.py migrate
+
+create_ecr:
+  stage: create_ecr
+  script:
+    - terraform -chdir=infra init
+    - terraform -chdir=infra apply -target=module.ecr -auto-approve
+
+create_s3:
+  stage: create_s3
+  script:
+    - terraform -chdir=infra init
+    - terraform -chdir=infra apply -target=module.storage -auto-approve
 
 front_build:
   stage: front_build
