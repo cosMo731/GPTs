@@ -22,6 +22,7 @@ Security best practices are implemented in the modules:
 - ALB drops invalid headers and is internal by default.
 - ECR enables image scanning on push.
 - CloudFront supports modern TLS and accepts an optional WAF Web ACL.
+- CloudFront default cache behavior forwards no cookies and disables query strings.
 - Lambda functions have tracing enabled.
 - RDS instances enable performance insights.
 - S3 buckets create a public access block.

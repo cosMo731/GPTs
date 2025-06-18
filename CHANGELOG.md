@@ -6,3 +6,4 @@
 - enable tfsec-suggested security options in modules
 - remove binary files from Sphinx build output
 - remove docs directory and Sphinx configuration
+- fix CloudFront module to set forwarded values
