@@ -1,6 +1,4 @@
 variable "aws_region" { type = string }
-variable "tf_state_bucket" { type = string }
-variable "tf_state_key" { type = string }
 variable "s3_bucket_name" { type = string }
 variable "ecr_repository_name" { type = string }
 variable "ecs_cluster_name" { type = string }

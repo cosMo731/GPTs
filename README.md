@@ -14,8 +14,15 @@ instantiate the individual service modules such as ECR, ECS, RDS, Lambda,
 ALB, CloudFront, and S3.
 
 Each environment specifies the AWS provider via a `required_providers` block
-with version `~> 5.0`. Backend values like bucket and key must be injected
-through CI/CD variables (`TF_STATE_BUCKET`, `TF_STATE_KEY`, `AWS_REGION`).
+with version `~> 5.0`. Because backend blocks cannot reference variables,
+S3 backend settings are passed during `terraform init`:
+
+```bash
+terraform init \
+  -backend-config="bucket=${TF_STATE_BUCKET}" \
+  -backend-config="key=${TF_STATE_KEY}" \
+  -backend-config="region=${AWS_REGION}"
+```
 
 Security best practices are implemented in the modules:
 
