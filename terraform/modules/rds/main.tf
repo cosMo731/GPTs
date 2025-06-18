@@ -8,6 +8,17 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot = true
 }
 
-variable "identifier" { type = string }
-variable "username" { type = string }
-variable "password" { type = string }
+variable "identifier" {
+  type        = string
+  description = "Identifier of the RDS instance"
+}
+
+variable "username" {
+  type        = string
+  description = "Master username"
+}
+
+variable "password" {
+  type        = string
+  description = "Master password"
+}

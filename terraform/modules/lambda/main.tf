@@ -6,7 +6,22 @@ resource "aws_lambda_function" "main" {
   filename      = var.filename
 }
 
-variable "function_name" { type = string }
-variable "handler" { type = string }
-variable "role_arn" { type = string }
-variable "filename" { type = string }
+variable "function_name" {
+  type        = string
+  description = "Name of the Lambda function"
+}
+
+variable "handler" {
+  type        = string
+  description = "Handler entry point"
+}
+
+variable "role_arn" {
+  type        = string
+  description = "IAM role ARN"
+}
+
+variable "filename" {
+  type        = string
+  description = "Deployment package"
+}

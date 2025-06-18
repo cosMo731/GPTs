@@ -4,5 +4,12 @@ resource "aws_lb" "main" {
   subnets            = var.subnet_ids
 }
 
-variable "name" { type = string }
-variable "subnet_ids" { type = list(string) }
+variable "name" {
+  type        = string
+  description = "Name of the ALB"
+}
+
+variable "subnet_ids" {
+  type        = list(string)
+  description = "Subnets for the ALB"
+}

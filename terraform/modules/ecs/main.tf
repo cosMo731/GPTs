@@ -3,5 +3,6 @@ resource "aws_ecs_cluster" "main" {
 }
 
 variable "cluster_name" {
-  type = string
+  type        = string
+  description = "Name of the ECS cluster"
 }

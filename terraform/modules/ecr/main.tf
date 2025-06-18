@@ -8,5 +8,6 @@ output "repository_url" {
 }
 
 variable "name" {
-  type = string
+  type        = string
+  description = "Name of the ECR repository"
 }

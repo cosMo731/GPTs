@@ -23,4 +23,7 @@ resource "aws_cloudfront_distribution" "main" {
   }
 }
 
-variable "s3_domain_name" { type = string }
+variable "s3_domain_name" {
+  type        = string
+  description = "Domain name of the S3 origin"
+}
