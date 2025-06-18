@@ -1,7 +1,0 @@
-prefix          = "prod"
-region          = "us-east-1"
-image_tag       = "latest"
-docker_host     = "tcp://192.168.0.1:2375"
-docker_registry = "registry.prod.example.com"
-docker_username = "produser"
-docker_password = "prodpass"
