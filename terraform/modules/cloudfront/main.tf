@@ -30,6 +30,7 @@ resource "aws_cloudfront_distribution" "main" {
   }
 
   web_acl_id = var.web_acl_id
+  tags       = var.tags
 }
 
 variable "s3_domain_name" {
@@ -41,4 +42,10 @@ variable "web_acl_id" {
   type        = string
   description = "ID of the WAF Web ACL"
   default     = ""
+}
+
+variable "tags" {
+  type        = map(string)
+  description = "Resource tags"
+  default     = {}
 }

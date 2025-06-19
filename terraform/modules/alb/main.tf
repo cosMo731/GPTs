@@ -3,6 +3,7 @@ resource "aws_lb" "main" {
   load_balancer_type = "application"
   subnets            = var.subnet_ids
   internal           = var.internal
+  tags               = var.tags
   drop_invalid_header_fields = true
 }
 
@@ -20,4 +21,10 @@ variable "internal" {
   type        = bool
   description = "Whether the ALB is internal"
   default     = true
+}
+
+variable "tags" {
+  type        = map(string)
+  description = "Resource tags"
+  default     = {}
 }

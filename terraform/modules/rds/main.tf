@@ -7,6 +7,7 @@ resource "aws_db_instance" "main" {
   password            = var.password
   skip_final_snapshot = true
   performance_insights_enabled = true
+  tags                        = var.tags
 }
 
 variable "identifier" {
@@ -22,4 +23,10 @@ variable "username" {
 variable "password" {
   type        = string
   description = "Master password"
+}
+
+variable "tags" {
+  type        = map(string)
+  description = "Resource tags"
+  default     = {}
 }

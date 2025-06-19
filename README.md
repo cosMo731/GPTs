@@ -24,6 +24,28 @@ terraform init \
   -backend-config="region=${AWS_REGION}"
 ```
 
+### GitLab CI/CD Usage
+
+In GitLab pipelines, provide backend settings and workspace names via CI/CD
+variables:
+
+```yaml
+terraform:
+  script:
+    - terraform init \
+        -backend-config="bucket=${TF_STATE_BUCKET}" \
+        -backend-config="key=${TF_STATE_KEY}" \
+        -backend-config="region=${AWS_REGION}" \
+        -backend-config="dynamodb_table=${TF_STATE_LOCK_TABLE}"
+    - terraform workspace select "${TF_WORKSPACE}" || \
+      terraform workspace new "${TF_WORKSPACE}"
+    - terraform plan -out=plan.tfplan
+    - terraform apply -auto-approve plan.tfplan
+```
+
+Resources are automatically tagged with `Environment = ${TF_WORKSPACE}` using
+`terraform.workspace`.
+
 Security best practices are implemented in the modules:
 
 - ALB drops invalid headers and is internal by default.

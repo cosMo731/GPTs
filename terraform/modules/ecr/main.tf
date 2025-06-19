@@ -4,6 +4,7 @@ resource "aws_ecr_repository" "main" {
   image_scanning_configuration {
     scan_on_push = true
   }
+  tags = var.tags
 }
 
 output "repository_url" {
@@ -13,4 +14,10 @@ output "repository_url" {
 variable "name" {
   type        = string
   description = "Name of the ECR repository"
+}
+
+variable "tags" {
+  type        = map(string)
+  description = "Resource tags"
+  default     = {}
 }

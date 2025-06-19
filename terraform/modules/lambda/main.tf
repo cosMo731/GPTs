@@ -4,6 +4,7 @@ resource "aws_lambda_function" "main" {
   runtime       = "python3.12"
   role          = var.role_arn
   filename      = var.filename
+  tags          = var.tags
   tracing_config {
     mode = "Active"
   }
@@ -27,4 +28,10 @@ variable "role_arn" {
 variable "filename" {
   type        = string
   description = "Deployment package"
+}
+
+variable "tags" {
+  type        = map(string)
+  description = "Resource tags"
+  default     = {}
 }
