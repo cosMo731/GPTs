@@ -1,176 +1,325 @@
-# GitLab CI/CD pipeline for Django and Vue application
-# Stages: build -> test -> deploy
-# Release MRs run the full pipeline including Terraform and image push
+variables:
+  # ジョブ成功とみなすテストのカバレッジ下限
+  COVERAGE_THRESHOLD: 70
 
 workflow:
+  # ブランチ毎にパイプラインを作成する条件
   rules:
-    - if: $CI_MERGE_REQUEST_ID
+    # main への push
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    # release への push
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    # feature/* 向けの push (ブランチ名: feature/xxx)
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /feature\//'
+      when: always
+    # feature/* 向けの merge request (ブランチ名: feature/xxx)
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /feature\//'
+      when: always
+    # development 向けの merge request
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
+      when: always
+    # いずれにも該当しなければ起動しない
+    - when: never
+
+stages:
+  - backend_analysis_test
+  - frontend_analysis_test
+  - backend_unit_test
+  - frontend_unit_test
+  - deploy
+  - function_test
+  - create_s3
+  - create_ecr
+  - front_build
+  - push_front
+  - backend_build
+  - push_backend
+  - system_test
+  - release_test
+
+backend_analysis_test:
+  image: python:3.12-slim
+  stage: backend_analysis_test
+  before_script:
+    - cd backend
+    - pip install uv
+    - uv sync --frozen
+  script:
+    # backendでruff/I linterを実行
+    - source .venv/bin/activate
+    - ruff check mysite/
+  # stageを実行する対象のブランチ
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
       when: always
     - when: never
 
-# Docker-in-Docker runner using custom CI image
-default:
-  image: myregistry/my-ci-image:latest
-  services:
-    - name: docker:dind
-      alias: docker
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
+frontend_analysis_test:
+  image: node:lts-bookworm-slim
+  stage: frontend_analysis_test
   before_script:
-    - docker info
-  cache:
-    key: "$CI_PROJECT_ID-$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cache/pip
-      - .npm
-  privileged: true
-
-stages:
-  - build
-  - test
-  - deploy
-
-# ---- Build stage ----
-# Build base image for feature branches
-mr_setup:
-  stage: build
+    - cd frontend
+    - npm ci
+    - npm install --save-dev eslint eslint-plugin-vue @typescript-eslint/parser @typescript-eslint/eslint-plugin
   script:
-    - docker build --build-arg TARGET_ENV=feature --target build -t myapp-build:${CI_COMMIT_SHA} .
+    # frontendでlinterを実行
+    - npx eslint --ext .ts,.vue,.js,.cjs src/
+  # stageを実行する対象のブランチ
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "feature"'
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
+      when: always
+    - when: never
 
-# Build SAST image once per pipeline
-build_sast_image:
-  stage: build
+backend_unit_test:
+  image: python:3.12-slim
+  stage: backend_unit_test
+  before_script:
+    - cd backend
+    - pip install uv
+    - uv sync --frozen
   script:
-    - docker build --build-arg TARGET_ENV=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --target sast -t myapp-sast:${CI_COMMIT_SHA} .
+    - source .venv/bin/activate
+    - coverage run --source='netcollect,users' \
+        --omit='mysite/users/admin.py,*/migrations/*,mysite/netcollect/views/get_bgp_neighbors.py' \
+        mysite/check_coverage.py $COVERAGE_THRESHOLD
+  # stageを実行する対象のブランチ
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - mr_setup
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
+      when: always
+    - when: never
 
-# ---- Test stage ----
-front_sast:
-  stage: test
+frontend_unit_test:
+  image: node:lts-bookworm-slim
+  stage: frontend_unit_test
+  before_script:
+    - cd frontend
+    - npm ci
   script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} eslint .
+    - npm run test:checkcoverage -- $COVERAGE_THRESHOLD --exclude /scripts/ --exclude /tests/
+  # stageを実行する対象のブランチ
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - build_sast_image
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /feature\//'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
+      when: always
+    - when: never
+
+deploy:
+  stage: deploy
+  script:
+    # 開発サーバ06でpush対象リビジョンをclone & djangoサーバコンテナ起動
+    # TODO: seleniumテストの実動作環境は？（暫定でdev6号機）
+    # 最終的にはdeployする環境(ECS)をターゲットにする
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - eval "$(ssh-agent)"
+    - ssh-add "$SSH_PRIVATE_KEY"
+    - mkdir ~/.ssh/ && chmod 700 ~/.ssh
+    - ssh-keyscan -p22 -H 192.168.0.15 >> ~/.ssh/known_hosts
+    - ssh -A ubuntu@192.168.0.15 'cd /home/ubuntu/cicd && docker compose --profile dev down && docker compose --profile dev pull && docker compose --profile dev up -d'
+    - ssh -A ubuntu@192.168.0.15 'rm -rf /home/ubuntu/cicd && git clone http://gitlab-ci-token:${CI_JOB_TOKEN}@172.26.215.82/cicd.git /home/ubuntu/cicd && git checkout $CI_COMMIT_REF_NAME && docker compose --profile dev up -d'
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
+      when: always
+    - when: never
+
+function_test:
+  stage: function_test
+  before_script:
+    - cd backend
+    - pip install uv
+    - uv sync --frozen
+    - source .venv/bin/activate
+    # selenium動作環境構築
+    - export https_proxy=http://172.10.10.10:80
+    - export http_proxy=http://172.10.10.10:80
+    - apt update
+    # chromeドライバのインストール
+    - apt -y install curl unzip jq
+    - chmod 644 mysite/tests_selenium/driver/fetch_driver_url.sh
+    - DRIVER_URL=$(./mysite/tests_selenium/driver/fetch_driver_url.sh)
+    - DRIVER_FILE='chromedriver-linux64.zip'
+    - curl -L -o "$DRIVER_FILE" "$DRIVER_URL"
+    - unzip ./chromedriver-linux64.zip
+    - cp 'chromedriver-linux64/chromedriver' 'mysite/tests_selenium/driver/chromedriver'
+    - ls -a mysite/tests_selenium/driver
+    # ブラウザドライバの依存ライブラリをインストール
+    - apt -y install libxcb1-dev
+    - apt -y install libnss3-dev
+    - apt -y install gconf-gsettings-backend
+    # chromeブラウザインストール
+    - BROWSER_URL='https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'
+    - curl -L -o /tmp/$(basename $BROWSER_URL) "$BROWSER_URL"
+    - apt -y install /tmp/$(basename $BROWSER_URL)
+    - export no_proxy=127.0.0.1,localhost
+  script:
+    - python mysite/manage.py test tests_selenium
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "development"'
+      when: always
+    - when: never
+
+create_s3:
+  stage: create_s3
+  script:
+    - terraform -chdir=infra init
+    - terraform -chdir=infra apply -target=module.s3 -auto-approve
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
+
+create_ecr:
+  stage: create_ecr
+  script:
+    - terraform -chdir=infra init
+    - terraform -chdir=infra apply -target=module.ecr -auto-approve
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
+
+front_build:
+  image: node:lts-bookworm-slim
+  stage: front_build
+  before_script:
+    - cd frontend
+    - npm ci
+  script:
+    - npm run build
   artifacts:
     paths:
-      - eslint-report.txt
-
-backend_sast:
-  stage: test
-  script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} ruff . > ruff-report.txt
+      - frontend/dist/
+    expire_in: 1 day
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - front_sast
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
+
+push_front:
+  image: amazonlinux:2
+  stage: push_front
+  dependencies:
+    - front_build
+  before_script:
+    - yum install -y unzip curl python3
+    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awsliv2.zip"
+    - unzip awsliv2.zip
+    - ./aws/install
+    - aws --version
+  script:
+    - aws s3 sync frontend/dist/ "s3://${S3_BUCKET_NAME}/${S3_UPLOAD_PREFIX}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
+  variables:
+    S3_UPLOAD_PREFIX:  # 任意の prefix が必要ならここで指定
+
+backend_build:
+  image: docker:24.0.6
+  stage: backend_build
+  services:
+    - docker:24.0.6-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375/
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - cd backend
+  script:
+    - docker build -t ${CI_REGISTRY_IMAGE}/backend:${CI_COMMIT_SHA} .
+    - docker save ${CI_REGISTRY_IMAGE}/backend:${CI_COMMIT_SHA} -o backend_image.tar
   artifacts:
     paths:
-      - ruff-report.txt
-
-tf_sast:
-  stage: test
-  script:
-    - docker run --rm myapp-sast:${CI_COMMIT_SHA} tfsec /app/terraform > tfsec-report.txt
+      - backend/backend_image.tar
+    expire_in: 1 day
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ "^(feature|develop|release)$"'
-  needs:
-    - backend_sast
-  artifacts:
-    paths:
-      - tfsec-report.txt
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
 
-unit_tests:
-  stage: test
+push_backend:
+  image: amazonlinux:2
+  stage: push_backend
+  dependencies:
+    - backend_build
+  before_script:
+    - yum install -y docker unzip curl python3
+    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awsliv2.zip"
+    - unzip awsliv2.zip
+    - ./aws/install
+    - $(aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $SECR_REGISTRY)
+    - docker load -i backend/backend_image.tar
   script:
-    - docker build --build-arg TARGET_ENV=release --target test -t myapp-test:${CI_COMMIT_SHA} .
-    - docker run --rm myapp-test:${CI_COMMIT_SHA} pytest --junitxml=junit.xml tests/unit
+    - docker tag ${CI_REGISTRY_IMAGE}/backend:${CI_COMMIT_SHA} $SECR_REGISTRY/$SECR_REPOSITORY:latest
+    - docker push $SECR_REGISTRY/$SECR_REPOSITORY:latest
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - tf_sast
-  artifacts:
-    reports:
-      junit: junit.xml
-    expire_in: 1 week
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
 
-functional_tests:
-  stage: test
+system_test:
+  stage: system_test
+  before_script:
+    - cd backend
+    - pip install uv
+    - uv sync --frozen
+    - source .venv/bin/activate
+    # selenium動作環境構築
+    - export https_proxy=http://172.10.10.10:80
+    - export http_proxy=http://172.10.10.10:80
+    - apt update
+    # chromeドライバのインストール
+    - apt -y install curl unzip jq
+    - chmod 644 mysite/tests_selenium/driver/fetch_driver_url.sh
+    - DRIVER_URL=$(./mysite/tests_selenium/driver/fetch_driver_url.sh)
+    - DRIVER_FILE='chromedriver-linux64.zip'
+    - curl -L -o "$DRIVER_FILE" "$DRIVER_URL"
+    - unzip ./chromedriver-linux64.zip
+    - cp 'chromedriver-linux64/chromedriver' 'mysite/tests_selenium/driver/chromedriver'
+    - ls -a mysite/tests_selenium/driver
+    # ブラウザドライバの依存ライブラリをインストール
+    - apt -y install libxcb1-dev
+    - apt -y install libnss3-dev
+    - apt -y install gconf-gsettings-backend
+    # chromeブラウザインストール
+    - BROWSER_URL='https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'
+    - curl -L -o /tmp/$(basename $BROWSER_URL) "$BROWSER_URL"
+    - apt -y install /tmp/$(basename $BROWSER_URL)
+    - export no_proxy=127.0.0.1,localhost
   script:
-    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp-runtime:${CI_COMMIT_SHA} .
-    - docker run -d --name django_app -p 8000:8000 myapp-runtime:${CI_COMMIT_SHA}
-    - docker exec django_app pytest tests/functional
-    - docker stop django_app
+    - python mysite/manage.py test tests_selenium
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - unit_tests
-
-# ---- Deploy stage ----
-terraform_init:
-  stage: deploy
-  image: hashicorp/terraform:1.5.6
-  script:
-    - terraform init
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - functional_tests
-
-terraform_plan:
-  stage: deploy
-  image: hashicorp/terraform:1.5.6
-  script:
-    - terraform plan -out=tfplan
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - terraform_init
-
-terraform_apply:
-  stage: deploy
-  image: hashicorp/terraform:1.5.6
-  script:
-    - terraform apply -auto-approve tfplan
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - terraform_plan
-
-dev_deploy:
-  stage: deploy
-  script:
-    - docker build --build-arg TARGET_ENV=develop --target runtime -t myapp:dev-${CI_COMMIT_SHA} .
-    - echo "Deploying container to EC2 filesystem"
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
-  needs:
-    - tf_sast
-
-build_image:
-  stage: deploy
-  script:
-    - docker build --build-arg TARGET_ENV=release --target runtime -t myapp:${CI_COMMIT_SHA} .
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - terraform_apply
-
-push_image:
-  stage: deploy
-  image: amazon/aws-cli:latest
-  script:
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_ACCOUNT_URL
-    - docker tag myapp:${CI_COMMIT_SHA} $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
-    - docker push $AWS_ECR_ACCOUNT_URL/myapp:${CI_COMMIT_SHA}
-  rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "release"'
-  needs:
-    - build_image
+    - if: '$CI_COMMIT_BRANCH == "release" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
